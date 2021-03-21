@@ -545,6 +545,9 @@ class API:
             'links': []
         }
 
+        # Used to store provider locale (if supported)
+        prv_locale = None
+
         collections = filter_dict_by_key_value(self.config['resources'],
                                                'type', 'collection')
 
@@ -733,18 +736,26 @@ class API:
                 if dataset is not None:
                     LOGGER.debug('Creating extended coverage metadata')
                     try:
-                        p = load_plugin('provider', get_provider_by_type(
+                        provider_def = get_provider_by_type(
                             self.config['resources'][k]['providers'],
-                            'coverage'), request.raw_locale)
-                        collection['crs'] = [p.crs]
-                        collection['domainset'] = p.get_coverage_domainset()
-                        collection['rangetype'] = p.get_coverage_rangetype()
+                            'coverage')
+                        p = load_plugin('provider', provider_def)
                     except ProviderConnectionError:
                         msg = 'connection error (check logs)'
                         return self.get_exception(500, headers, request.format,
                                                   'NoApplicableCode', msg)
                     except ProviderTypeError:
                         pass
+                    else:
+                        # Get provider language (if any)
+                        prv_locale = l10n.get_plugin_locale(provider_def,
+                                                            request.raw_locale)
+
+                        collection['crs'] = [p.crs]
+                        collection['domainset'] = p.get_coverage_domainset(
+                            language=prv_locale)
+                        collection['rangetype'] = p.get_coverage_rangetype(
+                            language=prv_locale)
 
             try:
                 tile = get_provider_by_type(v['providers'], 'tile')
@@ -777,8 +788,7 @@ class API:
                 LOGGER.debug('Adding EDR links')
                 try:
                     p = load_plugin('provider', get_provider_by_type(
-                        self.config['resources'][dataset]['providers'],
-                        'edr'), request.raw_locale)
+                        self.config['resources'][dataset]['providers'], 'edr'))
                     parameters = p.get_fields()
                     if parameters:
                         collection['parameters'] = {}
@@ -838,6 +848,7 @@ class API:
             })
 
         if request.format == 'html':  # render
+            l10n.set_response_language(headers, prv_locale)
 
             if dataset is not None:
                 content = render_j2_template(self.config,
@@ -851,6 +862,8 @@ class API:
             return headers, 200, content
 
         if request.format == 'jsonld':
+            l10n.set_response_language(headers, prv_locale, True)
+
             jsonld = self.fcmld.copy()  # noqa
             if dataset is not None:
                 jsonld['dataset'] = jsonldify_collection(self, fcm,
@@ -862,6 +875,7 @@ class API:
                 ]
             return headers, 200, to_json(jsonld, self.pretty_print)
 
+        l10n.set_response_language(headers, prv_locale, True)
         return headers, 200, to_json(fcm, self.pretty_print)
 
     @pre_process
@@ -891,13 +905,11 @@ class API:
         try:
             LOGGER.debug('Loading feature provider')
             p = load_plugin('provider', get_provider_by_type(
-                self.config['resources'][dataset]['providers'], 'feature'),
-                request.raw_locale)
+                self.config['resources'][dataset]['providers'], 'feature'))
         except ProviderTypeError:
             LOGGER.debug('Loading record provider')
             p = load_plugin('provider', get_provider_by_type(
-                self.config['resources'][dataset]['providers'], 'record'),
-                request.raw_locale)
+                self.config['resources'][dataset]['providers'], 'record'))
         except ProviderConnectionError:
             msg = 'connection error (check logs)'
             return self.get_exception(
@@ -1038,14 +1050,14 @@ class API:
         LOGGER.debug('Loading provider')
 
         try:
-            p = load_plugin('provider', get_provider_by_type(
-                collections[dataset]['providers'], 'feature'),
-                request.raw_locale)
+            provider_def = get_provider_by_type(
+                collections[dataset]['providers'], 'feature')
+            p = load_plugin('provider', provider_def)
         except ProviderTypeError:
             try:
-                p = load_plugin('provider', get_provider_by_type(
-                    collections[dataset]['providers'], 'record'),
-                    request.raw_locale)
+                provider_def = get_provider_by_type(
+                    collections[dataset]['providers'], 'record')
+                p = load_plugin('provider', provider_def)
             except ProviderTypeError:
                 msg = 'Invalid provider type'
                 return self.get_exception(
@@ -1114,6 +1126,9 @@ class API:
         else:
             skip_geometry = False
 
+        # Get provider locale (if any)
+        prv_locale = l10n.get_plugin_locale(provider_def, request.raw_locale)
+
         LOGGER.debug('Querying provider')
         LOGGER.debug('startindex: {}'.format(startindex))
         LOGGER.debug('limit: {}'.format(limit))
@@ -1123,6 +1138,7 @@ class API:
         LOGGER.debug('datetime: {}'.format(datetime_))
         LOGGER.debug('properties: {}'.format(select_properties))
         LOGGER.debug('skipGeometry: {}'.format(skip_geometry))
+        LOGGER.debug('language: {}'.format(prv_locale))
         LOGGER.debug('q: {}'.format(q))
 
         try:
@@ -1132,7 +1148,7 @@ class API:
                               sortby=sortby,
                               select_properties=select_properties,
                               skip_geometry=skip_geometry,
-                              q=q)
+                              q=q, language=prv_locale)
         except ProviderConnectionError as err:
             LOGGER.error(err)
             msg = 'connection error (check logs)'
@@ -1216,7 +1232,7 @@ class API:
             '%Y-%m-%dT%H:%M:%S.%fZ')
 
         if request.format == 'html':  # render
-            l10n.set_response_language(headers, p.locale)
+            l10n.set_response_language(headers, prv_locale)
 
             # For constructing proper URIs to items
             if pathinfo:
@@ -1242,11 +1258,10 @@ class API:
                                          content, request.locale)
             return headers, 200, content
         elif request.format == 'csv':  # render
-            l10n.set_response_language(headers, p.locale)
+            l10n.set_response_language(headers, prv_locale)
 
             formatter = load_plugin('formatter',
-                                    {'name': 'CSV', 'geom': True},
-                                    request.raw_locale)
+                                    {'name': 'CSV', 'geom': True})
 
             content = formatter.write(
                 data=content,
@@ -1266,11 +1281,11 @@ class API:
             return headers, 200, content
 
         elif request.format == 'jsonld':
-            l10n.set_response_language(headers, p.locale, True)
+            l10n.set_response_language(headers, prv_locale, True)
             content = geojson2geojsonld(self.config, content, dataset)
             return headers, 200, content
 
-        l10n.set_response_language(headers, p.locale, True)
+        l10n.set_response_language(headers, prv_locale, True)
         return headers, 200, to_json(content, self.pretty_print)
 
     @pre_process
@@ -1302,21 +1317,25 @@ class API:
         LOGGER.debug('Loading provider')
 
         try:
-            p = load_plugin('provider', get_provider_by_type(
-                collections[dataset]['providers'], 'feature'),
-                            request.raw_locale)
+            provider_def = get_provider_by_type(
+                collections[dataset]['providers'], 'feature')
+            p = load_plugin('provider', provider_def)
         except ProviderTypeError:
             try:
-                p = load_plugin('provider', get_provider_by_type(
-                    collections[dataset]['providers'], 'record'),
-                                request.raw_locale)
+                provider_def = get_provider_by_type(
+                    collections[dataset]['providers'], 'record')
+                p = load_plugin('provider', provider_def)
             except ProviderTypeError:
                 msg = 'Invalid provider type'
                 return self.get_exception(
                     400, headers, request.format, 'InvalidParameterValue', msg)
+
+        # Get provider language (if any)
+        prv_locale = l10n.get_plugin_locale(provider_def, request.raw_locale)
+
         try:
             LOGGER.debug('Fetching id {}'.format(identifier))
-            content = p.get(identifier)
+            content = p.get(identifier, language=prv_locale)
         except ProviderConnectionError as err:
             LOGGER.error(err)
             msg = 'connection error (check logs)'
@@ -1380,7 +1399,7 @@ class API:
         }]
 
         if request.format == 'html':  # render
-            l10n.set_response_language(headers, p.locale)
+            l10n.set_response_language(headers, prv_locale)
 
             content['title'] = l10n.translate(collections[dataset]['title'],
                                               request.locale)
@@ -1394,14 +1413,14 @@ class API:
             return headers, 200, content
 
         elif request.format == 'jsonld':
-            l10n.set_response_language(headers, p.locale, True)
+            l10n.set_response_language(headers, prv_locale, True)
 
             content = geojson2geojsonld(
                 self.config, content, dataset, identifier=identifier
             )
             return headers, 200, content
 
-        l10n.set_response_language(headers, p.locale, True)
+        l10n.set_response_language(headers, prv_locale, True)
         return headers, 200, to_json(content, self.pretty_print)
 
     @pre_process
@@ -1425,8 +1444,7 @@ class API:
             collection_def = get_provider_by_type(
                 self.config['resources'][dataset]['providers'], 'coverage')
 
-            p = load_plugin('provider', collection_def,
-                            request.raw_locale)
+            p = load_plugin('provider', collection_def)
         except KeyError:
             msg = 'collection does not exist'
             return self.get_exception(
@@ -1561,10 +1579,13 @@ class API:
             collection_def = get_provider_by_type(
                 self.config['resources'][dataset]['providers'], 'coverage')
 
-            p = load_plugin('provider', collection_def,
-                            request.raw_locale)
+            p = load_plugin('provider', collection_def)
 
-            data = p.get_coverage_domainset()
+            # Get provider language (if any)
+            prv_locale = l10n.get_plugin_locale(collection_def,
+                                                request.raw_locale)
+
+            data = p.get_coverage_domainset(language=prv_locale)
         except KeyError:
             msg = 'collection does not exist'
             return self.get_exception(
@@ -1579,8 +1600,12 @@ class API:
                 500, headers, format_, 'NoApplicableCode', msg)
 
         if format_ == 'json':
+            l10n.set_response_language(headers, prv_locale, True)
             return headers, 200, to_json(data, self.pretty_print)
+
         elif format_ == 'html':
+            l10n.set_response_language(headers, prv_locale)
+
             data['id'] = dataset
             data['title'] = l10n.translate(
                 self.config['resources'][dataset]['title'], request.locale)
@@ -1610,10 +1635,13 @@ class API:
             collection_def = get_provider_by_type(
                 self.config['resources'][dataset]['providers'], 'coverage')
 
-            p = load_plugin('provider', collection_def,
-                            request.raw_locale)
+            p = load_plugin('provider', collection_def)
 
-            data = p.get_coverage_rangetype()
+            # Get provider language (if any)
+            prv_locale = l10n.get_plugin_locale(collection_def,
+                                                request.raw_locale)
+
+            data = p.get_coverage_rangetype(language=prv_locale)
         except KeyError:
             msg = 'collection does not exist'
             return self.get_exception(
@@ -1628,8 +1656,12 @@ class API:
                 500, headers, format_, 'NoApplicableCode', msg)
 
         if format_ == 'json':
+            l10n.set_response_language(headers, prv_locale, True)
             return headers, 200, to_json(data, self.pretty_print)
+
         elif format_ == 'html':
+            l10n.set_response_language(headers, prv_locale)
+
             data['id'] = dataset
             data['title'] = l10n.translate(
                 self.config['resources'][dataset]['title'], request.locale)
@@ -1668,7 +1700,7 @@ class API:
         try:
             t = get_provider_by_type(
                     self.config['resources'][dataset]['providers'], 'tile')
-            p = load_plugin('provider', t, request.raw_locale)
+            p = load_plugin('provider', t)
         except (KeyError, ProviderTypeError):
             msg = 'Invalid collection tiles'
             return self.get_exception(
@@ -1780,7 +1812,7 @@ class API:
         try:
             t = get_provider_by_type(
                 self.config['resources'][dataset]['providers'], 'tile')
-            p = load_plugin('provider', t, request.raw_locale)
+            p = load_plugin('provider', t)
 
             format_ = p.format_type
             headers['Content-Type'] = format_
@@ -1856,7 +1888,7 @@ class API:
         try:
             t = get_provider_by_type(
                 self.config['resources'][dataset]['providers'], 'tile')
-            p = load_plugin('provider', t, request.raw_locale)
+            p = load_plugin('provider', t)
         except KeyError:
             msg = 'Invalid collection tiles'
             return self.get_exception(
@@ -1870,6 +1902,9 @@ class API:
             return self.get_exception(
                 500, headers, request.format, 'InvalidParameterValue', msg)
 
+        # Get provider language (if any)
+        prv_locale = l10n.get_plugin_locale(t, request.raw_locale)
+
         if matrix_id not in p.options['schemes']:
             msg = 'tileset not found'
             return self.get_exception(404, headers, request.format,
@@ -1880,7 +1915,8 @@ class API:
 
         tiles_metadata = p.get_metadata(
             dataset=dataset, server_url=self.config['server']['url'],
-            layer=p.get_layer(), tileset=matrix_id, tilejson=tilejson)
+            layer=p.get_layer(), tileset=matrix_id, tilejson=tilejson,
+            language=prv_locale)
 
         if request.format == 'html':  # render
             metadata = dict(metadata=tiles_metadata)
@@ -1934,8 +1970,7 @@ class API:
 
             for key, value in relevant_processes:
                 p = load_plugin('process',
-                                processes_config[key]['processor'],
-                                request.raw_locale)
+                                processes_config[key]['processor'])
 
                 p2 = deepcopy(p.metadata)
 
@@ -2016,8 +2051,7 @@ class API:
             return self.get_exception(
                 404, headers, request.format, 'NoSuchProcess', msg)
 
-        p = load_plugin('process', processes[process_id]['processor'],
-                        request.raw_locale)
+        p = load_plugin('process', processes[process_id]['processor'])
 
         if self.manager:
             if job_id is None:
@@ -2123,8 +2157,7 @@ class API:
                 500, headers, request.format, 'NoApplicableCode', msg)
 
         process = load_plugin('process',
-                              processes_config[process_id]['processor'],
-                              request.raw_locale)
+                              processes_config[process_id]['processor'])
 
         if not request.data:
             # TODO not all processes require input, e.g. time-dependent or
@@ -2237,8 +2270,7 @@ class API:
                 404, headers, request.format, 'NoSuchProcess', msg)
 
         process = load_plugin('process',
-                              processes_config[process_id]['processor'],
-                              request.raw_locale)
+                              processes_config[process_id]['processor'])
 
         if not process:
             msg = 'identifier not found'
@@ -2392,7 +2424,7 @@ class API:
         LOGGER.debug('Loading provider')
         try:
             p = load_plugin('provider', get_provider_by_type(
-                collections[dataset]['providers'], 'edr'), request.raw_locale)
+                collections[dataset]['providers'], 'edr'))
         except ProviderTypeError:
             msg = 'invalid provider type'
             return self.get_exception(
@@ -2444,12 +2476,10 @@ class API:
                 500, headers, request.format, 'NoApplicableCode', msg)
 
         if request.format == 'html':  # render
-            l10n.set_response_language(headers, p.locale)
             content = render_j2_template(self.config,
                                          'collections/edr/query.html', data,
                                          request.locale)
         else:
-            l10n.set_response_language(headers, p.locale, True)
             content = to_json(data, self.pretty_print)
 
         return headers, 200, content
@@ -2534,8 +2564,7 @@ class API:
         LOGGER.debug('Loading provider')
         try:
             p = load_plugin('provider', get_provider_by_type(
-                stac_collections[dataset]['providers'], 'stac'),
-                            request.raw_locale)
+                stac_collections[dataset]['providers'], 'stac'))
         except ProviderConnectionError as err:
             LOGGER.error(err)
             msg = 'connection error (check logs)'
